@@ -198,6 +198,7 @@ export default defineConfig({
         }
       },
       ...[
+        ['agent-runtime', 'tests'],
         ['ai-sdk-provider', 'src'],
         ['remote-protocol', 'tests'],
         ['remote-transport', 'tests']
