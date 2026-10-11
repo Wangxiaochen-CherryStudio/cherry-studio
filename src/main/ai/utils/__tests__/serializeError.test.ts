@@ -149,8 +149,7 @@ describe('serializeError', () => {
       const retryError = new RetryError({
         message: 'Failed after 3 attempts',
         reason: 'maxRetriesExceeded',
-        errors: [kvError, authError],
-        lastError: authError
+        errors: [kvError, authError]
       })
 
       const result = serializeError(retryError, {

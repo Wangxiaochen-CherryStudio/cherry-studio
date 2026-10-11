@@ -60,8 +60,8 @@ import {
 } from '../../../utils/modelParameters'
 import {
   readOllamaWireNumCtx,
-  resolveModelRequestContextWindow,
   resolveOllamaRequestNumCtx,
+  resolveRequestContextWindow,
   usesOllamaWirePath,
   writeOllamaWireNumCtx
 } from '../../../utils/ollamaRequestNumCtx'
@@ -146,6 +146,17 @@ export async function buildAgentParams(input: BuildAgentParamsInput): Promise<Bu
     topicId: request.conversation.topicId,
     modelName: model.name ?? model.id
   })
+  const { endpointType } = resolvedEndpoint
+  const ollamaNumCtxResolution = usesOllamaWirePath(provider, endpointType, sdkConfig.providerId)
+    ? resolveOllamaRequestNumCtx(model, provider, endpointType)
+    : undefined
+  const ollamaNumCtx = ollamaNumCtxResolution
+    ? {
+        uniqueModelId: model.id,
+        trainedContextWindow: ollamaNumCtxResolution.trainedContextWindow,
+        numCtx: ollamaNumCtxResolution.numCtx
+      }
+    : undefined
   // Prefer the request-carried retained context: the persistent chat provider
   // computes it from the RAW message path, so attachments and persisted tool
   // outputs folded away by durable compaction stay readable via read_file /
@@ -192,11 +203,12 @@ export async function buildAgentParams(input: BuildAgentParamsInput): Promise<Bu
       : false,
     reasoningEffort: request.reasoningEffort ?? assistant?.settings.reasoning_effort
   })
-  const requestContextWindow = resolveModelRequestContextWindow(
+  const requestContextWindow = resolveRequestContextWindow(
     model,
     provider,
-    resolvedEndpoint.endpointType,
-    sdkConfig.providerId
+    endpointType,
+    sdkConfig.providerId,
+    ollamaNumCtx
   )
   const { tools, deferredEntries, hasCitableTools, mcpToolIds, mcpResourceServerIds, mcpServerIds } = toolSignals
     ? await resolveTools(
@@ -229,7 +241,6 @@ export async function buildAgentParams(input: BuildAgentParamsInput): Promise<Bu
       })
     : undefined
 
-  const { endpointType } = resolvedEndpoint
   const aiSdkProviderId = resolveAiSdkProviderId(provider, endpointType)
   const runtimeProviderId = sdkConfig.providerId
   const reasoningEndpointType =
@@ -262,17 +273,6 @@ export async function buildAgentParams(input: BuildAgentParamsInput): Promise<Bu
     aiSdkProviderId,
     runtimeProviderId
   })
-
-  const ollamaNumCtxResolution = usesOllamaWirePath(provider, endpointType, sdkConfig.providerId)
-    ? resolveOllamaRequestNumCtx(model, provider, endpointType)
-    : undefined
-  const ollamaNumCtx = ollamaNumCtxResolution
-    ? {
-        uniqueModelId: model.id,
-        trainedContextWindow: ollamaNumCtxResolution.trainedContextWindow,
-        numCtx: ollamaNumCtxResolution.numCtx
-      }
-    : undefined
 
   const requestContext: RequestContext = {
     requestId: request.messageId ?? crypto.randomUUID(),
@@ -706,14 +706,11 @@ function buildAgentOptions(
   let ollamaNumCtxSnapshot = requestContext.ollamaNumCtx
   let sanitizedProviderOptions = effectiveProviderOptions
   if (usesOllamaWirePath(provider, endpointType, sdkConfig.providerId) && ollamaNumCtxSnapshot) {
-    const resolution = resolveOllamaRequestNumCtx(model, provider, endpointType)
-    if (resolution) {
-      const existingWireNumCtx = readOllamaWireNumCtx(effectiveProviderOptions)
-      const wireNumCtx =
-        existingWireNumCtx != null ? Math.min(existingWireNumCtx, resolution.numCtx) : resolution.numCtx
-      sanitizedProviderOptions = writeOllamaWireNumCtx(effectiveProviderOptions, wireNumCtx)
-      ollamaNumCtxSnapshot = { ...ollamaNumCtxSnapshot, numCtx: wireNumCtx }
-    }
+    const cappedNumCtx = ollamaNumCtxSnapshot.numCtx
+    const existingWireNumCtx = readOllamaWireNumCtx(effectiveProviderOptions)
+    const wireNumCtx = existingWireNumCtx != null ? Math.min(existingWireNumCtx, cappedNumCtx) : cappedNumCtx
+    sanitizedProviderOptions = writeOllamaWireNumCtx(effectiveProviderOptions, wireNumCtx)
+    ollamaNumCtxSnapshot = { ...ollamaNumCtxSnapshot, numCtx: wireNumCtx }
   }
 
   const sanitized = stripRejectedSamplingParams(
