@@ -163,7 +163,7 @@ export const inLoopCompactionFeature: RequestFeature = {
         scope.provider,
         scope.endpointType,
         scope.sdkConfig?.providerId,
-        scope.requestContext.ollamaNumCtx
+        scope.requestContext?.ollamaNumCtx
       )
     )
     if (contextWindow === null) {
