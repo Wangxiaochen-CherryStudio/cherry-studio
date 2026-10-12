@@ -19,6 +19,7 @@ import {
   WEB_SEARCH_TOOL_NAME
 } from '@shared/ai/builtinTools'
 import type { CompactionSink } from '@shared/ai/compaction'
+import type { OllamaNumCtxRequestSnapshot } from '@shared/ai/ollamaNumCtx'
 import type { WebSearchCapability } from '@shared/data/preference/preferenceTypes'
 import {
   type Assistant,
@@ -115,6 +116,8 @@ export interface BuildAgentParamsInput {
   getRepairUsagePlugins?: () => AiPlugin[]
   /** Reports compaction progress to the UI; absent when there is no live stream. */
   compactionSink?: CompactionSink
+  /** Skips host RAM re-sampling; used when fallback wire context was frozen at attachment-budget time. */
+  frozenOllamaNumCtx?: OllamaNumCtxRequestSnapshot
 }
 
 export interface BuiltAgentParams {
@@ -147,16 +150,20 @@ export async function buildAgentParams(input: BuildAgentParamsInput): Promise<Bu
     modelName: model.name ?? model.id
   })
   const { endpointType } = resolvedEndpoint
-  const ollamaNumCtxResolution = usesOllamaWirePath(provider, endpointType, sdkConfig.providerId)
-    ? resolveOllamaRequestNumCtx(model, provider, endpointType)
-    : undefined
-  const ollamaNumCtx = ollamaNumCtxResolution
-    ? {
-        uniqueModelId: model.id,
-        trainedContextWindow: ollamaNumCtxResolution.trainedContextWindow,
-        numCtx: ollamaNumCtxResolution.numCtx
-      }
-    : undefined
+  const ollamaNumCtx =
+    input.frozenOllamaNumCtx ??
+    (() => {
+      const ollamaNumCtxResolution = usesOllamaWirePath(provider, endpointType, sdkConfig.providerId)
+        ? resolveOllamaRequestNumCtx(model, provider, endpointType)
+        : undefined
+      return ollamaNumCtxResolution
+        ? {
+            uniqueModelId: model.id,
+            trainedContextWindow: ollamaNumCtxResolution.trainedContextWindow,
+            numCtx: ollamaNumCtxResolution.numCtx
+          }
+        : undefined
+    })()
   // Prefer the request-carried retained context: the persistent chat provider
   // computes it from the RAW message path, so attachments and persisted tool
   // outputs folded away by durable compaction stay readable via read_file /
