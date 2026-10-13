@@ -76,8 +76,8 @@ import { withReasoningTimingMetadata } from './withReasoningTimingMetadata'
 
 const logger = loggerService.withContext('AiStreamManager')
 
-function serializeStreamError(error: unknown, request: ManagedAiStreamRequest) {
-  return serializeError(error, request.streamErrorSerialization)
+function serializeStreamError(error: unknown, exec: StreamExecution, request: ManagedAiStreamRequest) {
+  return serializeError(error, exec.streamErrorSerialization ?? request.streamErrorSerialization)
 }
 
 type ManagedAiStreamRequest = AiStreamRequest & {
@@ -231,10 +231,6 @@ function toActiveExecution(exec: StreamExecution): ActiveExecution {
     anchorMessageId: exec.anchorMessageId,
     ...(exec.seedFromEmpty ? { seedFromEmpty: true } : {})
   }
-}
-
-function errorFromStreamChunk(errorText: string): SerializedError {
-  return { name: 'StreamError', message: errorText, stack: null }
 }
 
 function findBufferedToolInput(exec: StreamExecution, toolCallId: string): UIMessageChunk | undefined {
@@ -1951,7 +1947,7 @@ export class AiStreamManager extends BaseService {
 
     exec.loopPromise = launchLoop().catch((err) => {
       // Defensive funnel for sync throws (e.g. `streamText` rejects before returning a stream).
-      return this.onExecutionError(topicId, modelId, serializeStreamError(err, request), exec)
+      return this.onExecutionError(topicId, modelId, serializeStreamError(err, exec, request), exec)
     })
 
     return exec
@@ -1965,7 +1961,9 @@ export class AiStreamManager extends BaseService {
   ): Promise<void> {
     const aiService = application.get('AiService')
     const signal = exec.abortController.signal
-    request.streamErrorSerialization ??= {}
+    const streamErrorSerialization = request.streamErrorSerialization ?? {}
+    request.streamErrorSerialization = streamErrorSerialization
+    exec.streamErrorSerialization = streamErrorSerialization
 
     let rawStream: ReadableStream<UIMessageChunk>
     try {
@@ -1974,6 +1972,7 @@ export class AiStreamManager extends BaseService {
       // `signal` is injected here because it's not IPC-serialisable.
       rawStream = await aiService.streamText({
         ...request,
+        streamErrorSerialization,
         requestOptions: { ...request.requestOptions, signal },
         runtimeTimingSink: exec.runtimeTiming.sink,
         // Compaction runs deep inside param-build / the tool loop, where the
@@ -1995,7 +1994,7 @@ export class AiStreamManager extends BaseService {
       if (!signal.aborted) {
         logger.error('streamText failed before stream start', { topicId, modelId, err: chatErrorContext(err) })
       }
-      await this.onExecutionError(topicId, modelId, serializeStreamError(err, request), exec)
+      await this.onExecutionError(topicId, modelId, serializeStreamError(err, exec, request), exec)
       return
     }
 
@@ -2042,7 +2041,7 @@ export class AiStreamManager extends BaseService {
     }
 
     if (result.threw !== undefined) {
-      const fromThrow = serializeStreamError(result.threw.error, request)
+      const fromThrow = serializeStreamError(result.threw.error, exec, request)
       if (signal.aborted) {
         logger.debug('Execution aborted', { topicId, modelId, reason: signal.reason })
       } else {
@@ -2050,7 +2049,7 @@ export class AiStreamManager extends BaseService {
       }
       const serialized =
         result.streamErrorText !== undefined && !signal.aborted && !hasHttpMetadata(fromThrow)
-          ? errorFromStreamChunk(result.streamErrorText)
+          ? serializeStreamError(new Error(result.streamErrorText), exec, request)
           : fromThrow
       await this.onExecutionError(topicId, modelId, serialized, exec)
       return
@@ -2064,9 +2063,14 @@ export class AiStreamManager extends BaseService {
       if (exec.status === 'streaming') exec.status = 'aborted'
       await this.onExecutionPaused(topicId, modelId, exec)
     } else if (result.streamErrorText !== undefined) {
-      await this.onExecutionError(topicId, modelId, errorFromStreamChunk(result.streamErrorText), exec)
+      await this.onExecutionError(
+        topicId,
+        modelId,
+        serializeStreamError(new Error(result.streamErrorText), exec, request),
+        exec
+      )
     } else if (result.accumulationError !== undefined) {
-      const error = serializeError(result.accumulationError.error)
+      const error = serializeError(result.accumulationError.error, exec.streamErrorSerialization)
       error.executionFailure = toExecutionFailure(error, modelId, 'host')
       await this.onExecutionError(topicId, modelId, error, exec)
     } else {
