@@ -147,7 +147,8 @@ export async function createAgentRuntimeSession<TRequestOptions>(
             createSession: ({ fork, ...overrides }) =>
               createAgentRuntimeSession({ ...options, ...overrides, subagents: fork ? options.subagents : undefined }),
             parentTranscript: () => tap.entries(),
-            parentModelKey: key
+            parentModelKey: key,
+            emit: (event) => options.onEvent?.(event)
           })
         ]
       : []),
