@@ -1,4 +1,4 @@
-import { type AssistantMessage, StringEnum, type ToolResultMessage, Type } from '@earendil-works/pi-ai'
+import { type AssistantMessage, StringEnum, type ToolResultMessage, Type, type Usage } from '@earendil-works/pi-ai'
 import {
   type AgentBeforeSettleEvent,
   type AgentBeforeSettleEventResult,
@@ -45,10 +45,14 @@ import { type ConversationModelMessage, toModelMessages } from './modelMessages'
 import type { ToolApprovalEvent } from './ports'
 import {
   isSubagentSession,
+  MESSAGE_SUBAGENT_TOOL_NAME,
+  STOP_SUBAGENT_TOOL_NAME,
   SUBAGENT_GOAL_LINK,
   SUBAGENT_TOOL_NAME,
   type SubagentDetails,
-  type SubagentGoalLink
+  type SubagentGoalLink,
+  type SubagentMessageDetails,
+  type SubagentStopDetails
 } from './subagent'
 import { SUBAGENT_NOTIFICATION_TYPE, type SubagentNotificationDetails } from './subagentDelivery'
 
@@ -124,7 +128,7 @@ function statusText(goal: GoalSnapshot, armed: boolean, waitingFor: number): str
 const isNotificationDraft = (draft: SessionBoundaryDraft): draft is CustomMessageEntryDraft =>
   draft.type === 'custom_message' && draft.customType === SUBAGENT_NOTIFICATION_TYPE
 
-/** The background subagents the goal's rounds started: their usage counts toward its budget (spec §11.4). */
+/** The subagents whose background runs the goal's rounds started: their usage counts toward its budget (spec §11.4). */
 function goalSubagentsOf(entries: readonly SessionEntry[], goalId: string): Set<string> {
   const ids = new Set<string>()
   let inRound = false
@@ -134,17 +138,28 @@ function goalSubagentsOf(entries: readonly SessionEntry[], goalId: string): Set<
     else if (entry.type === 'message' && entry.message.role === 'user') inRound = false
     else if (entry.type === 'custom_message' && entry.customType === SUBAGENT_NOTIFICATION_TYPE) inRound = false
     else if (inRound && entry.type === 'message' && entry.message.role === 'toolResult') {
-      const id = launchedInBackground(entry.message)
+      const id = backgroundRunId(entry.message)
       if (id) ids.add(id)
     }
   }
   return ids
 }
 
-/** The id of a subagent a `subagent` result started or moved to the background. */
-function launchedInBackground(result: ToolResultMessage): string | undefined {
-  const details = result.details as SubagentDetails | undefined
-  return result.toolName === SUBAGENT_TOOL_NAME && details?.background === true ? details.sessionId : undefined
+/** The id of the subagent whose background run a result started: a launch, a move or a continuation. */
+function backgroundRunId(result: ToolResultMessage): string | undefined {
+  if (result.toolName === SUBAGENT_TOOL_NAME) {
+    const details = result.details as SubagentDetails | undefined
+    return details?.background === true ? details.sessionId : undefined
+  }
+  if (result.toolName !== MESSAGE_SUBAGENT_TOOL_NAME) return undefined
+  const details = result.details as SubagentMessageDetails | undefined
+  return details?.continued === true ? details.sessionId : undefined
+}
+
+/** The run a `stop_subagent` result stopped, with its usage; no notification follows to carry it. */
+function stoppedRun(result: ToolResultMessage): Extract<SubagentStopDetails, { stopped: true }> | undefined {
+  const details = result.details as SubagentStopDetails | undefined
+  return result.toolName === STOP_SUBAGENT_TOOL_NAME && details?.stopped === true ? details : undefined
 }
 
 const createParams = Type.Object({
@@ -365,8 +380,10 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
       subagents?.guardBackground(() =>
         runtime.goal?.phase === 'active' && runtime.armed && usedUp() ? BUDGET_REFUSAL : undefined
       )
+      const ownSessionId = ctx.sessionManager.getSessionId()
       unsubscribeApproval = port.onApproval?.((event) => {
         // The host's registry also reports the subagents' calls; only this session's are the goal's.
+        if ((event.sessionId ?? ownSessionId) !== ownSessionId) return
         if (!runtime.goal || !runtime.inGoalRound || !runtime.ownCalls.has(event.toolCallId)) return
         if (event.kind === 'denied')
           runtime.stopRequest = { code: 'approval_denied', message: `tool call ${event.toolCallId} was denied` }
@@ -708,17 +725,25 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
           runtime.pendingUsage.usd += result.usage.cost.total
         }
     }
-    /** Spec §11.4: a run of the goal's background subagents counts once its notification reaches the model. */
+    /**
+     * Spec §11.4: a run of the goal's background subagents counts once, when its result reaches the
+     * model: its notification, or the `stop_subagent` result of a run the model stopped.
+     */
+    const countRun = (sessionId: string, usage: Usage) => {
+      if (!runtime.goalSubagents.has(sessionId)) return
+      runtime.pendingUsage.tokens += usage.totalTokens
+      runtime.pendingUsage.usd += usage.cost.total
+    }
     const countDelivered = (details: SubagentNotificationDetails) => {
-      for (const item of details.subagents)
-        if (runtime.goalSubagents.has(item.sessionId)) {
-          runtime.pendingUsage.tokens += item.usage.totalTokens
-          runtime.pendingUsage.usd += item.usage.cost.total
-        }
+      for (const item of details.subagents) countRun(item.sessionId, item.usage)
     }
 
     pi.on('turn_end', (event, ctx) => {
       if (!runtime.goal || event.message.role !== 'assistant') return
+      for (const result of event.toolResults) {
+        const stopped = stoppedRun(result)
+        if (stopped) countRun(stopped.sessionId, stopped.usage)
+      }
       if (!runtime.inGoalRound) {
         // Spec §11.3: a notification's turn works for an armed goal, so its usage counts, but it is no round.
         const forGoal = runtime.goal.phase === 'active' && runtime.armed
@@ -728,8 +753,8 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
       }
       addTurnUsage(event.message, event.toolResults)
       for (const result of event.toolResults) {
-        const launched = launchedInBackground(result)
-        if (launched) runtime.goalSubagents.add(launched)
+        const started = backgroundRunId(result)
+        if (started) runtime.goalSubagents.add(started)
         if (isProgressResult(result)) runtime.round.toolProgress = true
         // Stored sessions and thrown calls carry no `outcome`.
         if (
