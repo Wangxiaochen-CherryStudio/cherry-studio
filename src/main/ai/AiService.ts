@@ -663,7 +663,10 @@ export class AiService extends BaseService {
       retryDisabledForRequest,
       hasApiKeyFallbacks
     )
-    const fallbackOllamaSnapshots = buildFallbackOllamaNumCtxSnapshots(attachmentFallbackModelIds)
+    const primaryHasTools = !!tools && Object.keys(tools).length > 0
+    const requiredNativeFileSupport = resolveRequiredNativeFileSupport(request.messages, nativeFileSupport)
+    const fallbackEligibility = { primaryHasTools, requiredNativeFileSupport }
+    const fallbackOllamaSnapshots = buildFallbackOllamaNumCtxSnapshots(attachmentFallbackModelIds, fallbackEligibility)
 
     // Route attachments: native files stay inline, non-native become capped text
     // (always visible — never gated on the model calling read_file). The cap is
@@ -688,7 +691,9 @@ export class AiService extends BaseService {
                 runtimeProviderId: sdkConfig.providerId,
                 ollamaNumCtx: requestContext?.ollamaNumCtx ?? null,
                 fallbackModelIds: attachmentFallbackModelIds,
-                fallbackOllamaSnapshots
+                fallbackOllamaSnapshots,
+                primaryHasTools,
+                requiredNativeFileSupport
               }),
               system,
               tools,
@@ -708,6 +713,7 @@ export class AiService extends BaseService {
       ? (repairOptions: Parameters<NonNullable<typeof options.repairToolCall>>[0]) =>
           activeRepairToolCall!(repairOptions)
       : undefined
+    let disposeFallbackPrepareStep: (() => void) | undefined
     let wrapModel: ReturnType<typeof createRetryableWrap>
     if (!retryDisabledForRequest) {
       const apiKeyFallbacks = buildApiKeyFallbackModels({
@@ -741,8 +747,8 @@ export class AiService extends BaseService {
           assistant,
           signal,
           primaryUniqueModelId: model.id,
-          primaryHasTools: !!tools && Object.keys(tools).length > 0,
-          requiredNativeFileSupport: resolveRequiredNativeFileSupport(request.messages, nativeFileSupport),
+          primaryHasTools,
+          requiredNativeFileSupport,
           extraFeatures,
           retryPolicy,
           fallbackOllamaSnapshots,
@@ -760,6 +766,11 @@ export class AiService extends BaseService {
         }),
         onFallbackActivated: (fallback) => {
           activeRepairToolCall = fallback.repairToolCall ?? options.repairToolCall
+          disposeFallbackPrepareStep?.()
+          disposeFallbackPrepareStep = undefined
+          if (fallback.prepareStep) {
+            disposeFallbackPrepareStep = agentRef.current?.on('prepareStep', fallback.prepareStep)
+          }
           if (fallback.streamErrorSerialization !== undefined) {
             if (fallback.streamErrorSerialization === null) {
               delete streamErrorSerialization.ollamaNumCtx
@@ -770,6 +781,8 @@ export class AiService extends BaseService {
         },
         onPrimaryActivated: () => {
           activeRepairToolCall = options.repairToolCall
+          disposeFallbackPrepareStep?.()
+          disposeFallbackPrepareStep = undefined
           const requestContext = options.context as RequestContext | undefined
           if (requestContext?.ollamaNumCtx) {
             streamErrorSerialization.ollamaNumCtx = requestContext.ollamaNumCtx
