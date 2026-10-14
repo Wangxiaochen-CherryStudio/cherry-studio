@@ -5,6 +5,7 @@ import { modelService } from '@data/services/ModelService'
 import { providerService } from '@data/services/ProviderService'
 import { atomicWriteFile } from '@main/utils/file'
 import type { Model } from '@shared/data/types/model'
+import { parseUniqueModelId } from '@shared/data/types/model'
 import type { CodeCliRunInput } from '@shared/ipc/schemas/codeCli'
 import { AbsoluteFilePathSchema } from '@shared/types/file'
 import { ANTIGRAVITY_MODEL_PATH_SEPARATOR, formatGatewayModelId, gatewayClientOrigin } from '@shared/utils/apiGateway'
@@ -14,7 +15,10 @@ import { getRawModelId } from '@shared/utils/model'
 import { isShellSafeModelId } from './shellQuote'
 
 function resolveUserModelForLaunch(providerId: string, launchModelId: string): Model {
-  const match = modelService.list({ providerId }).find((entry) => getRawModelId(entry) === launchModelId)
+  const match = modelService.list({ providerId }).find((entry) => {
+    const storedId = parseUniqueModelId(entry.id).modelId
+    return storedId === launchModelId || getRawModelId(entry) === launchModelId
+  })
   if (match) return match
   return modelService.getByKey(providerId, launchModelId)
 }
@@ -81,6 +85,7 @@ export async function prepareAntigravityLaunch(input: NormalRunInput): Promise<A
     const userModel = resolveUserModelForLaunch(input.providerId, input.model)
     apiKey = providerService.resolveApiKey(provider.id, undefined, userModel.apiKeyId).value
     baseUrl = resolveGeminiBaseUrl(provider)
+    model = userModel.apiModelId ?? input.model
   }
 
   if (!apiKey) throw new Error('Antigravity CLI requires an API key')

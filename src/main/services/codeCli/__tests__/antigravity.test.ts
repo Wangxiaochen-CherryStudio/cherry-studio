@@ -111,16 +111,17 @@ describe('prepareAntigravityLaunch', () => {
     ])
     mocks.resolveApiKey.mockReturnValue({ value: 'alias-secret' })
 
-    await prepareAntigravityLaunch({
+    const result = await prepareAntigravityLaunch({
       mode: 'normal',
       cliTool: CodeCli.ANTIGRAVITY_CLI,
       providerId: 'custom-gemini',
-      model: 'gemini-2.5-pro',
+      model: 'my-alias',
       directory: '/tmp/project'
     })
 
     expect(mocks.getByKey).not.toHaveBeenCalled()
     expect(mocks.resolveApiKey).toHaveBeenCalledWith('custom-gemini', undefined, 'key-bound')
+    expect(result.model).toBe('gemini-2.5-pro')
   })
 
   it('reads gateway credentials in main and uses an Antigravity custom model URL without the Gemini sentinel', async () => {
