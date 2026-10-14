@@ -57,7 +57,7 @@ import {
   filterStandardParams,
   getTemperature,
   getTopP,
-  stripRejectedSamplingParams
+  stripUnsupportedModelParams
 } from '../../../utils/modelParameters'
 import {
   readOllamaWireNumCtx,
@@ -720,7 +720,7 @@ function buildAgentOptions(
     ollamaNumCtxSnapshot = { ...ollamaNumCtxSnapshot, numCtx: wireNumCtx }
   }
 
-  const sanitized = stripRejectedSamplingParams(
+  const sanitized = stripUnsupportedModelParams(
     { standardParams, providerOptions: sanitizedProviderOptions, bodyParams },
     model
   )

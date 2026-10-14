@@ -172,9 +172,10 @@ vi.mock('@cherrystudio/ai-core', () => ({
   createAgent: (...args: unknown[]) => mockCreateAgent(...args),
   definePlugin: (plugin: unknown) => plugin,
   embedMany: async (...args: unknown[]) => {
+    const params = args[2] as { onProviderCallStart?: () => (event: unknown) => void }
+    const handler = params.onProviderCallStart?.()
     const result = await mockEmbedMany(...args)
-    const params = args[2] as { onProviderCall?: (event: unknown) => void }
-    params.onProviderCall?.({
+    handler?.({
       modality: 'embedding',
       requestId: 'ai-core:embedding:test',
       providerId: args[0],
@@ -186,9 +187,10 @@ vi.mock('@cherrystudio/ai-core', () => ({
     return result
   },
   generateImage: async (...args: unknown[]) => {
+    const params = args[2] as { onProviderCallStart?: () => (event: unknown) => void }
+    const handler = params.onProviderCallStart?.()
     const result = await mockGenerateImage(...args)
-    const params = args[2] as { onProviderCall?: (event: unknown) => void }
-    params.onProviderCall?.({
+    handler?.({
       modality: 'image',
       requestId: 'ai-core:image:test',
       providerId: args[0],
@@ -200,9 +202,10 @@ vi.mock('@cherrystudio/ai-core', () => ({
     return result
   },
   rerank: async (...args: unknown[]) => {
+    const params = args[2] as { onProviderCallStart?: () => (event: unknown) => void }
+    const handler = params.onProviderCallStart?.()
     const result = await mockRerank(...args)
-    const params = args[2] as { onProviderCall?: (event: unknown) => void }
-    params.onProviderCall?.({
+    handler?.({
       modality: 'rerank',
       requestId: 'ai-core:rerank:test',
       providerId: args[0],
@@ -1824,19 +1827,18 @@ describe('AiService tool approval', () => {
       fileAttachments: []
     })
 
+    const streamErrorSerialization = {}
     const managedRequest = {
       conversation: { id: 'conversation-1', topicId: 'topic-1' },
       trigger: 'submit-message' as const,
-      messages: []
+      messages: [],
+      streamErrorSerialization
     }
-    const streamErrorSerialization = {}
-    managedRequest.streamErrorSerialization = streamErrorSerialization
 
     await service.streamText({
       ...managedRequest,
-      streamErrorSerialization,
       requestOptions: { signal: new AbortController().signal }
-    } as never)
+    })
 
     const retryOptions = mockCreateRetryableWrap.mock.calls[0][0] as {
       onFallbackActivated: (fallback: { streamErrorSerialization: { ollamaNumCtx: object } }) => void

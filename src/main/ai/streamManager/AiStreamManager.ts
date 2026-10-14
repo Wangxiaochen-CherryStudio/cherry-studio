@@ -80,6 +80,16 @@ function serializeStreamError(error: unknown, exec: StreamExecution, request: Ma
   return serializeError(error, exec.streamErrorSerialization ?? request.streamErrorSerialization)
 }
 
+function errorFromStreamChunk(
+  errorText: string,
+  exec: StreamExecution,
+  request: ManagedAiStreamRequest
+): SerializedError {
+  const streamError = new Error(errorText)
+  streamError.name = 'StreamError'
+  return serializeStreamError(streamError, exec, request)
+}
+
 type ManagedAiStreamRequest = AiStreamRequest & {
   usageContext?: InProcessUsageContext
   tokenUsageSource?: TokenUsageSource
@@ -2049,7 +2059,7 @@ export class AiStreamManager extends BaseService {
       }
       const serialized =
         result.streamErrorText !== undefined && !signal.aborted && !hasHttpMetadata(fromThrow)
-          ? serializeStreamError(new Error(result.streamErrorText), exec, request)
+          ? errorFromStreamChunk(result.streamErrorText, exec, request)
           : fromThrow
       await this.onExecutionError(topicId, modelId, serialized, exec)
       return
@@ -2063,12 +2073,7 @@ export class AiStreamManager extends BaseService {
       if (exec.status === 'streaming') exec.status = 'aborted'
       await this.onExecutionPaused(topicId, modelId, exec)
     } else if (result.streamErrorText !== undefined) {
-      await this.onExecutionError(
-        topicId,
-        modelId,
-        serializeStreamError(new Error(result.streamErrorText), exec, request),
-        exec
-      )
+      await this.onExecutionError(topicId, modelId, errorFromStreamChunk(result.streamErrorText, exec, request), exec)
     } else if (result.accumulationError !== undefined) {
       const error = serializeError(result.accumulationError.error, exec.streamErrorSerialization)
       error.executionFailure = toExecutionFailure(error, modelId, 'host')
