@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto'
 import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai'
 import type { SessionEntry } from '@earendil-works/pi-coding-agent'
 
+import { SUBAGENT_NOTIFICATION_TYPE } from './subagentDelivery'
+
 export const GOAL_STATE_TYPE = 'cherry.goal'
 export const GOAL_ROUND_TYPE = 'cherry.goal-round'
 /** Feedback of a `/goal` command for the UI; never sent to the model. */
@@ -20,7 +22,6 @@ export type GoalStopCode =
   | 'approval_denied'
   | 'awaiting_approval'
   | 'needs_user_input'
-  | 'waiting_subagents'
   | 'provider_error'
   | 'aborted'
   | 'paused_by_user'
@@ -265,15 +266,30 @@ export function currentGoal(entries: readonly SessionEntry[]): GoalSnapshot | un
 }
 
 const isRoundMessage = (entry: SessionEntry) => entry.type === 'custom_message' && entry.customType === GOAL_ROUND_TYPE
+const isNotification = (entry: SessionEntry) =>
+  entry.type === 'custom_message' && entry.customType === SUBAGENT_NOTIFICATION_TYPE
 
-/** True when the last user-side input on the branch came from a person, not from a goal round. */
-export function isHumanTurn(entries: readonly SessionEntry[]): boolean {
+/**
+ * What started the turn the branch ends in: a person, a goal round, or a background-subagent
+ * notification (spec §11.3). A notification that rode with a person's message is part of their turn.
+ */
+export function turnStarter(entries: readonly SessionEntry[]): 'human' | 'round' | 'notification' {
+  let notification = false
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]
-    if (isRoundMessage(entry)) return false
-    if (entry.type === 'message' && entry.message.role === 'user') return true
+    if (isRoundMessage(entry)) return 'round'
+    if (isNotification(entry)) notification = true
+    else if (entry.type === 'message') {
+      if (entry.message.role === 'user') return 'human'
+      if (notification) return 'notification'
+    }
   }
-  return true
+  return notification ? 'notification' : 'human'
+}
+
+/** True when the last user-side input on the branch came from a person, not from a goal round or a notification. */
+export function isHumanTurn(entries: readonly SessionEntry[]): boolean {
+  return turnStarter(entries) === 'human'
 }
 
 /**

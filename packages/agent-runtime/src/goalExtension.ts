@@ -1,12 +1,15 @@
-import { StringEnum, Type } from '@earendil-works/pi-ai'
+import { type AssistantMessage, StringEnum, type ToolResultMessage, Type } from '@earendil-works/pi-ai'
 import {
   type AgentBeforeSettleEvent,
   type AgentBeforeSettleEventResult,
   type AgentToolResult,
   buildSessionContext,
   convertToLlm,
+  type CustomMessageEntryDraft,
   type ExtensionContext,
-  type ExtensionFactory
+  type ExtensionFactory,
+  type SessionBoundaryDraft,
+  type SessionEntry
 } from '@earendil-works/pi-coding-agent'
 
 import { ASK_USER_TOOL_NAME, type AskUserQuestionDetails } from './askUserExtension'
@@ -35,11 +38,19 @@ import {
   type RoundDetails,
   stopGoal,
   tailRound,
-  toolCallKey
+  toolCallKey,
+  turnStarter
 } from './goalState'
 import { type ConversationModelMessage, toModelMessages } from './modelMessages'
 import type { ToolApprovalEvent } from './ports'
-import { isSubagentSession } from './subagent'
+import {
+  isSubagentSession,
+  SUBAGENT_GOAL_LINK,
+  SUBAGENT_TOOL_NAME,
+  type SubagentDetails,
+  type SubagentGoalLink
+} from './subagent'
+import { SUBAGENT_NOTIFICATION_TYPE, type SubagentNotificationDetails } from './subagentDelivery'
 
 /** Host-side completion check; without it the extension falls back to runtime checks (spec §9). */
 export interface GoalVerifier {
@@ -65,10 +76,11 @@ export interface GoalPort {
     autonomy: () => 'auto' | 'confirm-each-round'
   }
   modelSupportsTools(): boolean
-  /** Wired by the host integration (its ToolApprovalRegistry): approval events of this session's tool calls. */
+  /**
+   * Wired by the host integration (its ToolApprovalRegistry): approval events of this session's
+   * tool calls. Events of other calls (a subagent's) are ignored.
+   */
   onApproval?(listener: (event: ToolApprovalEvent) => void): () => void
-  /** L6: background subagents of this session still running; foreground subagents finish inside their call. */
-  hasRunningSubagents?(): boolean
   verify?: GoalVerifier
 }
 
@@ -83,6 +95,8 @@ const STOP_AFTER_ROUNDS = 3
 /** Identical calls in a row within one round before they are blocked, and before the goal stops (spec §7.2). */
 const BLOCK_REPEAT_AT = 3
 const STOP_REPEAT_AT = 5
+const BUDGET_REFUSAL = "The goal's budget is used up; background subagents cannot be started."
+
 /** Sent after the goal view when a completion is accepted (spec §7.5). */
 const COMPLETE_INSTRUCTION =
   'The goal is complete. End your turn with a short summary for the user of what was delivered and how it was checked; do not start new work.'
@@ -92,7 +106,7 @@ const hasText = (value: string | undefined): value is string => typeof value ===
 // 0 counts as omitted (weak models fill optional fields with it); negatives reach the limit checks.
 const hasNumber = (value: number | undefined): value is number => value !== undefined && value !== 0
 
-function statusText(goal: GoalSnapshot, armed: boolean): string {
+function statusText(goal: GoalSnapshot, armed: boolean, waitingFor: number): string {
   const stop = goal.lastStop
     ? ` (${goal.lastStop.code}${goal.lastStop.message ? ` — ${goal.lastStop.message}` : ''})`
     : ''
@@ -100,8 +114,37 @@ function statusText(goal: GoalSnapshot, armed: boolean): string {
     `Goal: ${goal.objective}`,
     `Phase: ${goal.phase}${stop} · ${armed ? 'armed' : 'disarmed'}`,
     `Rounds: ${goal.roundsStarted}/${goal.maxGoalRounds} · Tokens: ${goal.tokensUsed}` +
-      (goal.costUsed > 0 ? ` · Cost: $${goal.costUsed.toFixed(4)}` : '')
+      (goal.costUsed > 0 ? ` · Cost: $${goal.costUsed.toFixed(4)}` : ''),
+    ...(goal.phase === 'active' && waitingFor > 0
+      ? [`Waiting for ${waitingFor} background subagent${waitingFor === 1 ? '' : 's'}`]
+      : [])
   ].join('\n')
+}
+
+const isNotificationDraft = (draft: SessionBoundaryDraft): draft is CustomMessageEntryDraft =>
+  draft.type === 'custom_message' && draft.customType === SUBAGENT_NOTIFICATION_TYPE
+
+/** The background subagents the goal's rounds started: their usage counts toward its budget (spec §11.4). */
+function goalSubagentsOf(entries: readonly SessionEntry[], goalId: string): Set<string> {
+  const ids = new Set<string>()
+  let inRound = false
+  for (const entry of entries) {
+    if (entry.type === 'custom_message' && entry.customType === GOAL_ROUND_TYPE)
+      inRound = (entry.details as RoundDetails).goalId === goalId
+    else if (entry.type === 'message' && entry.message.role === 'user') inRound = false
+    else if (entry.type === 'custom_message' && entry.customType === SUBAGENT_NOTIFICATION_TYPE) inRound = false
+    else if (inRound && entry.type === 'message' && entry.message.role === 'toolResult') {
+      const id = launchedInBackground(entry.message)
+      if (id) ids.add(id)
+    }
+  }
+  return ids
+}
+
+/** The id of a subagent a `subagent` result started or moved to the background. */
+function launchedInBackground(result: ToolResultMessage): string | undefined {
+  const details = result.details as SubagentDetails | undefined
+  return result.toolName === SUBAGENT_TOOL_NAME && details?.background === true ? details.sessionId : undefined
 }
 
 const createParams = Type.Object({
@@ -151,6 +194,10 @@ interface Runtime {
   roundAdmitted: boolean
   /** This is a subagent's session: the goal belongs to the main agent (spec §8.4). */
   inSubagent: boolean
+  /** Tool calls of this session executing now; approval events of other calls are not the goal's. */
+  ownCalls: Set<string>
+  /** Background subagents this goal's rounds started. */
+  goalSubagents: Set<string>
 }
 
 /**
@@ -185,8 +232,14 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
       blocked: { round: 0, count: 0 },
       pendingUsage: { tokens: 0, usd: 0 },
       roundAdmitted: false,
-      inSubagent: false
+      inSubagent: false,
+      ownCalls: new Set(),
+      goalSubagents: new Set()
     }
+    let subagents: SubagentGoalLink | undefined
+    pi.events.on(SUBAGENT_GOAL_LINK, (link) => {
+      subagents = link as SubagentGoalLink
+    })
     const limits = () => ({
       maxGoalRounds: port.defaults.maxGoalRounds,
       maxGoalRoundsCeiling: port.defaults.maxGoalRoundsCeiling,
@@ -206,6 +259,8 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
       runtime.blocked = { round: 0, count: 0 }
       runtime.roundAdmitted = false
     }
+    const usedUp = () =>
+      runtime.goal !== undefined && budgetExceeded(recordUsage(runtime.goal, runtime.pendingUsage, false))
     /** Every persisted change goes through here; pending usage rides along when it is the same goal's. */
     const commit = (next: GoalSnapshot) => {
       const withUsage = next.id === runtime.goal?.id ? recordUsage(next, runtime.pendingUsage, false) : next
@@ -240,6 +295,7 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
     const create = (goal: GoalSnapshot) => {
       commit(goal)
       resetGoalRuntime()
+      runtime.goalSubagents = new Set()
       runtime.armed = true
       // A round still running belongs to the previous goal; the new one counts from its own first round.
       runtime.inGoalRound = false
@@ -305,8 +361,13 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
       runtime.goal = currentGoal(entries)
       runtime.armed = false
       runtime.inGoalRound = false
+      if (runtime.goal) runtime.goalSubagents = goalSubagentsOf(entries, runtime.goal.id)
+      subagents?.guardBackground(() =>
+        runtime.goal?.phase === 'active' && runtime.armed && usedUp() ? BUDGET_REFUSAL : undefined
+      )
       unsubscribeApproval = port.onApproval?.((event) => {
-        if (!runtime.goal || !runtime.inGoalRound) return
+        // The host's registry also reports the subagents' calls; only this session's are the goal's.
+        if (!runtime.goal || !runtime.inGoalRound || !runtime.ownCalls.has(event.toolCallId)) return
         if (event.kind === 'denied')
           runtime.stopRequest = { code: 'approval_denied', message: `tool call ${event.toolCallId} was denied` }
         if (event.kind === 'unavailable')
@@ -567,6 +628,8 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
         return undefined
       }
       if (!goal || goal.phase !== 'active') return undefined
+      // Spec §11.2: one start per request; the notification's turn settles first, then the goal decides.
+      if (event.entries.some(isNotificationDraft)) return undefined
       if (runtime.stopRequest) {
         const { code, message } = runtime.stopRequest
         runtime.stopRequest = undefined
@@ -580,10 +643,8 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
       }
       // Pi continues for a queued user message, not for an extension message that starts no turn.
       if (event.context.pendingMessages.some((message) => message.role === 'user')) return undefined
-      if (port.hasRunningSubagents?.() === true) {
-        stop('waiting_subagents')
-        return undefined
-      }
+      // Spec §11.4: the goal's own background subagents stop with its budget.
+      if (usedUp()) subagents?.stopForBudget(runtime.goalSubagents)
       if (runtime.noProgressRounds >= STOP_AFTER_ROUNDS) {
         stop('no_progress')
         return undefined
@@ -592,6 +653,8 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
         stop(goal.roundsStarted >= goal.maxGoalRounds ? 'round_limit' : 'budget_exhausted')
         return undefined
       }
+      // Spec §11.1: background subagents still at work; their notification starts the next turn.
+      if ((subagents?.running() ?? 0) > 0) return undefined
       // The budget check sees this round's usage; the next snapshot write folds it in.
       const projected = recordUsage(goal, runtime.pendingUsage, false)
       const round = { type: 'custom_message' as const, ...roundMessage(projected, reserve(projected)) }
@@ -607,7 +670,12 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
       // A round a command sent: its message_end comes after turn_start, before Pi persists it.
       else if (message.role === 'custom' && message.customType === GOAL_ROUND_TYPE)
         admit(message.details as RoundDetails)
+      // A notification that starts a turn or rides with a prompt; one merged at a settle has no message_end.
+      else if (message.role === 'custom' && message.customType === SUBAGENT_NOTIFICATION_TYPE)
+        countDelivered(message.details as SubagentNotificationDetails)
     })
+    pi.on('tool_execution_start', (event) => void runtime.ownCalls.add(event.toolCallId))
+    pi.on('tool_execution_end', (event) => void runtime.ownCalls.delete(event.toolCallId))
 
     pi.on('tool_call', (event) => {
       if (!runtime.goal || !runtime.inGoalRound || event.parentToolCallId !== undefined) return undefined
@@ -628,17 +696,40 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
       }
     })
 
-    pi.on('turn_end', (event) => {
-      if (!runtime.goal || !runtime.inGoalRound || event.message.role !== 'assistant') return
-      const { usage } = event.message
+    /** A turn's usage, with what its tools report: a foreground subagent's requests. */
+    const addTurnUsage = (message: AssistantMessage, results: readonly ToolResultMessage[]) => {
+      const { usage } = message
       runtime.pendingUsage.tokens += usage.input + usage.output + usage.cacheRead + usage.cacheWrite
       runtime.pendingUsage.usd += usage.cost.total
-      for (const result of event.toolResults) {
-        // A tool's own usage (a subagent's requests) counts too: the host billed it, the budget has not seen it.
+      // A tool's own usage (a subagent's requests) counts too: the host billed it, the budget has not seen it.
+      for (const result of results)
         if (result.usage) {
           runtime.pendingUsage.tokens += result.usage.totalTokens
           runtime.pendingUsage.usd += result.usage.cost.total
         }
+    }
+    /** Spec §11.4: a run of the goal's background subagents counts once its notification reaches the model. */
+    const countDelivered = (details: SubagentNotificationDetails) => {
+      for (const item of details.subagents)
+        if (runtime.goalSubagents.has(item.sessionId)) {
+          runtime.pendingUsage.tokens += item.usage.totalTokens
+          runtime.pendingUsage.usd += item.usage.cost.total
+        }
+    }
+
+    pi.on('turn_end', (event, ctx) => {
+      if (!runtime.goal || event.message.role !== 'assistant') return
+      if (!runtime.inGoalRound) {
+        // Spec §11.3: a notification's turn works for an armed goal, so its usage counts, but it is no round.
+        const forGoal = runtime.goal.phase === 'active' && runtime.armed
+        if (forGoal && turnStarter(ctx.sessionManager.getBranch()) === 'notification')
+          addTurnUsage(event.message, event.toolResults)
+        return
+      }
+      addTurnUsage(event.message, event.toolResults)
+      for (const result of event.toolResults) {
+        const launched = launchedInBackground(result)
+        if (launched) runtime.goalSubagents.add(launched)
         if (isProgressResult(result)) runtime.round.toolProgress = true
         // Stored sessions and thrown calls carry no `outcome`.
         if (
@@ -654,6 +745,8 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
 
     pi.on('agent_before_settle', (event, ctx) => {
       if (runtime.inSubagent) return undefined
+      for (const draft of event.entries)
+        if (isNotificationDraft(draft)) countDelivered(draft.details as SubagentNotificationDetails)
       // A request the host aborted through its own signal settles here; agent_settled reports aborted: false.
       if (event.outcome === 'aborted') {
         runtime.inGoalRound = false
@@ -685,7 +778,7 @@ export function createGoalExtension(port: GoalPort): ExtensionFactory {
           if (input === '') {
             notice(
               runtime.goal
-                ? statusText(runtime.goal, runtime.armed)
+                ? statusText(runtime.goal, runtime.armed, subagents?.running() ?? 0)
                 : 'No goal is set. Use /goal <objective> to create one.'
             )
             return
