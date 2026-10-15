@@ -38,9 +38,28 @@ const FORCE_STOP_TIMEOUT_MS = 1000
 const OUTPUT_CAPTURE_LIMIT = 32 * 1024
 const DIAGNOSTIC_LIMIT = 2000
 const NO_KEY_PLACEHOLDER = 'no-key-required'
+const PROVIDER_NO_KEY_PLACEHOLDERS: Record<string, string> = {
+  gpustack: 'gpustack',
+  ollama: 'ollama',
+  lmstudio: 'lmstudio'
+}
 const GATEWAY_ROUTE = 'cherry-studio-codemate-gateway'
 const GATEWAY_CREDENTIAL_REF = 'CHERRY_STUDIO_CODEMATE_GATEWAY_API_KEY'
 const MANAGED_CREDENTIAL_ENV = /^CHERRY_STUDIO_CODEMATE_(?:[A-F0-9]{12}|GATEWAY)_API_KEY$/i
+
+function resolveDirectCredentialValue(
+  provider: { id: string; type?: string; presetProviderId?: string },
+  apiKey: string
+): string {
+  if (apiKey) return apiKey
+  const providerKey = provider.presetProviderId ?? provider.id
+  return (
+    PROVIDER_NO_KEY_PLACEHOLDERS[providerKey] ??
+    PROVIDER_NO_KEY_PLACEHOLDERS[provider.id] ??
+    (provider.type ? PROVIDER_NO_KEY_PLACEHOLDERS[provider.type] : undefined) ??
+    NO_KEY_PLACEHOLDER
+  )
+}
 
 interface DeepSeekHarnessStartInput extends DeepSeekHarnessSettings {
   mode: DeepSeekHarnessMode
@@ -267,7 +286,7 @@ export class DeepSeekHarnessService extends BaseService {
     return {
       route,
       credentialRef,
-      credentialValue: apiKey || NO_KEY_PLACEHOLDER,
+      credentialValue: resolveDirectCredentialValue(provider, apiKey),
       displayName: `Cherry Studio: ${provider.name}`,
       protocol,
       baseUrl,

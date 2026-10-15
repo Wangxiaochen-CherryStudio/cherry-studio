@@ -1439,7 +1439,7 @@ describe('OpenClawService gateway status state machine', () => {
       expect((service as any).gatewayPort).toBe(12345)
     })
 
-    it('uses the selected model api key binding when syncing OpenClaw config', async () => {
+    it('uses automatic provider credentials and per-model bindings when syncing OpenClaw config', async () => {
       const { modelService } = await import('@data/services/ModelService')
       const { providerService } = await import('@data/services/ProviderService')
       vi.mocked(providerService.getByProviderId).mockReturnValue(createProvider())
@@ -1455,9 +1455,45 @@ describe('OpenClawService gateway status state machine', () => {
       const result = await service.syncConfig('openai::gpt-4o')
 
       expect(result).toEqual({ success: true })
-      expect(providerService.resolveApiKey).toHaveBeenCalledWith('openai', undefined, 'key-2')
+      expect(providerService.resolveApiKey).toHaveBeenCalledWith('openai', undefined, undefined)
       expect(syncProviderConfigSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ apiKey: 'sk-bound' }),
+        expect.objectContaining({
+          apiKey: 'sk-primary',
+          models: [expect.objectContaining({ id: 'gpt-4o', apiKey: 'sk-bound' })]
+        }),
+        expect.objectContaining({ id: 'gpt-4o', apiKey: 'sk-bound' })
+      )
+    })
+
+    it('keeps unbound models on automatic provider credentials when the primary model is bound', async () => {
+      const { modelService } = await import('@data/services/ModelService')
+      const { providerService } = await import('@data/services/ProviderService')
+      vi.mocked(providerService.getByProviderId).mockReturnValue(createProvider())
+      const primary = createModel({ apiKeyId: 'key-2' })
+      const secondary = createModel({
+        id: 'openai::gpt-4o-mini',
+        apiModelId: 'gpt-4o-mini',
+        name: 'GPT-4o mini'
+      })
+      vi.mocked(modelService.getByKey).mockReturnValue(primary)
+      vi.mocked(modelService.list).mockReturnValue([primary, secondary])
+      vi.mocked(providerService.getApiKeys).mockReturnValue([
+        { id: 'key-1', key: 'sk-auto', isEnabled: true },
+        { id: 'key-2', key: 'sk-bound', isEnabled: true }
+      ])
+      const syncProviderConfigSpy = vi.spyOn(service, 'syncProviderConfig').mockResolvedValue({ success: true })
+
+      await service.syncConfig('openai::gpt-4o')
+
+      expect(providerService.resolveApiKey).toHaveBeenCalledWith('openai', undefined, undefined)
+      expect(syncProviderConfigSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKey: 'sk-auto',
+          models: [
+            expect.objectContaining({ id: 'gpt-4o', apiKey: 'sk-bound' }),
+            expect.not.objectContaining({ apiKey: expect.anything() })
+          ]
+        }),
         expect.objectContaining({ id: 'gpt-4o' })
       )
     })
@@ -2053,6 +2089,29 @@ describe('OpenClawService gateway status state machine', () => {
       expect('message' in result && result.message).toContain('GPT-4o mini')
       // The formal config must be untouched rather than written with misrouted credentials.
       expect(fs.existsSync(path.join(configDir, 'openclaw.json'))).toBe(false)
+    })
+
+    it('reads legacy config when both legacy and primary config files exist', async () => {
+      const legacyPath = path.join(configDir, 'openclaw.cherry.json')
+      const primaryPath = path.join(configDir, 'openclaw.json')
+      fs.writeFileSync(
+        legacyPath,
+        JSON.stringify({
+          models: { providers: { 'external-legacy': { apiKey: 'legacy-only' } } }
+        })
+      )
+      fs.writeFileSync(
+        primaryPath,
+        JSON.stringify({
+          models: { providers: { 'external-primary': { apiKey: 'primary-only' } } }
+        })
+      )
+
+      await service.syncProviderConfig(legacyProvider, legacyModel)
+
+      const written = JSON.parse(fs.readFileSync(primaryPath, 'utf-8'))
+      expect(written.models.providers['external-legacy']).toEqual({ apiKey: 'legacy-only' })
+      expect(written.models.providers['external-primary']).toBeUndefined()
     })
 
     it('does not migrate legacy config files when sync fails before writing', async () => {

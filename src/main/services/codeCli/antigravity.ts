@@ -17,7 +17,7 @@ import { isShellSafeModelId } from './shellQuote'
 function resolveUserModelForLaunch(providerId: string, launchModelId: string): Model {
   const match = modelService.list({ providerId }).find((entry) => {
     const storedId = parseUniqueModelId(entry.id).modelId
-    return storedId === launchModelId || getRawModelId(entry) === launchModelId
+    return storedId === launchModelId || entry.apiModelId === launchModelId || getRawModelId(entry) === launchModelId
   })
   if (match) return match
   return modelService.getByKey(providerId, launchModelId)

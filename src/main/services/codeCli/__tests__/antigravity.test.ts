@@ -100,6 +100,30 @@ describe('prepareAntigravityLaunch', () => {
     if (process.platform !== 'win32') expect((await stat(settingsPath)).mode & 0o777).toBe(0o600)
   })
 
+  it('resolves bindings when the launch model id is the provider-facing apiModelId', async () => {
+    mocks.getByProviderId.mockReturnValue({ id: 'custom-gemini', endpointConfigs: {} })
+    mocks.list.mockReturnValue([
+      {
+        id: 'custom-gemini::my-alias',
+        apiModelId: 'gemini-2.5-pro',
+        apiKeyId: 'key-bound'
+      }
+    ])
+    mocks.resolveApiKey.mockReturnValue({ value: 'alias-secret' })
+
+    const result = await prepareAntigravityLaunch({
+      mode: 'normal',
+      cliTool: CodeCli.ANTIGRAVITY_CLI,
+      providerId: 'custom-gemini',
+      model: 'gemini-2.5-pro',
+      directory: '/tmp/project'
+    })
+
+    expect(mocks.getByKey).not.toHaveBeenCalled()
+    expect(mocks.resolveApiKey).toHaveBeenCalledWith('custom-gemini', undefined, 'key-bound')
+    expect(result.model).toBe('gemini-2.5-pro')
+  })
+
   it('resolves api key bindings by provider-facing apiModelId when the internal id differs', async () => {
     mocks.getByProviderId.mockReturnValue({ id: 'custom-gemini', endpointConfigs: {} })
     mocks.list.mockReturnValue([

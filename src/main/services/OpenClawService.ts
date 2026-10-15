@@ -1158,7 +1158,9 @@ export class OpenClawService extends BaseService {
       throw new Error(`Provider ${provider.id} has no API host configured for ${endpointType}`)
     }
 
-    const resolvedApiKey = providerService.resolveApiKey(providerId, undefined, primaryModel.apiKeyId)
+    // Provider-level credentials use automatic key selection; per-model bindings are
+    // serialized on each model entry and must not steer the shared provider fallback.
+    const resolvedApiKey = providerService.resolveApiKey(providerId, undefined, undefined)
     const apiKey = this.resolveSyncApiKey(provider, resolvedApiKey.value)
 
     return {
@@ -1327,7 +1329,9 @@ export class OpenClawService extends BaseService {
   private readExistingOpenClawConfig(): OpenClawConfig {
     const primaryPath = openclawConfigPath()
     const legacyPath = openclawLegacyConfigPath()
-    const sourcePath = fs.existsSync(primaryPath) ? primaryPath : fs.existsSync(legacyPath) ? legacyPath : null
+    // When legacy exists, migration promotes it over openclaw.json — read the file
+    // that will become canonical so hand-edited legacy settings are not discarded.
+    const sourcePath = fs.existsSync(legacyPath) ? legacyPath : fs.existsSync(primaryPath) ? primaryPath : null
 
     if (!sourcePath) {
       return {}
