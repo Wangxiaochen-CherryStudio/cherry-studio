@@ -372,15 +372,15 @@ Background subagent update (automatic message, not from the user):
 
 ### 7.5 静默项
 
-用户停止的运行只是让父代理"知道一下"，不值得为它开一轮。静默项留在队列里，随下一条通知（7.3/7.4）或下一个用户回合一起送达；送进用户回合时由父会话的 `before_agent_start` 返回为 `message`，排在用户消息之后。不用 `deliverAs: 'nextTurn'`：它只随真正的 `session.prompt()` 送出，命令（如 `/goal resume`）开出的轮不带它，消息会滞留在 Pi 的队列里（实施计划探针 c）。在用户回合真正开始之前，这些项留在包的队列里，也会在下一个 settle 并入。
+用户停止的运行只是让父代理"知道一下"，不值得为它开一轮。静默项留在队列里，随下一个运行的开头一起送达（用户回合、命令如 `/goal resume` 开出的轮、通知轮），由父会话的 `before_agent_start` 返回为 `message`，排在开出这一轮的消息之后；某次 settle 并入会唤醒的项时，静默项也一起并入。settle 时只有静默项不并入。（Pi 1.2.0 起 `before_agent_start` 对每个运行都触发，见 18 节第 12 条。）
 
 ### 7.6 中止后的抑制期
 
-父代理一轮被用户中止后，到下一个人类回合开始之前不自动开轮。两种中止都算：`session.abort()`（`agent_settled { aborted: true }`），以及宿主经自己的请求 signal 中止（`agent_before_settle` 的 `outcome: 'aborted'`，`agent_settled` 报 `aborted: false`，见 L5 的 I1）。用户按停止往往是想插话，立刻开一轮会和用户抢。期间结束的子代理照常进队列，随用户下一条消息一起送达（父会话 `before_agent_start` 返回的 `message`，见 7.5），之后恢复自动开轮。
+父代理一轮被用户中止后，到下一个运行开始之前（用户下一条消息，或用户敲的命令）不自动开轮。两种中止都算：`session.abort()`（`agent_settled { aborted: true }`），以及宿主经自己的请求 signal 中止（`agent_before_settle` 的 `outcome: 'aborted'`，`agent_settled` 报 `aborted: false`，见 L5 的 I1）。用户按停止往往是想插话，立刻开一轮会和用户抢。期间结束的子代理照常进队列，随下一个运行的开头一起送达（父会话 `before_agent_start` 返回的 `message`，见 7.5），之后恢复自动开轮。
 
 ### 7.7 重建后的未送达通知
 
-父会话重建（含重启）时，未送达的结束项，以及被打断的运行（作为 outcome 为 `interrupted`、用量为 0 的条目），恢复进队列，但**不自动开轮**，而是合成一条 `cherry.subagent-notification` 随用户下一条消息送达（7.5 的方式）。用通知而不是状态消息，是因为通知的 `(sessionId, run)` 去重键能保证每一项只说一次；状态消息每次重建都会再说一遍。Claude Code 在 2.1.280 明确改成"恢复会话时不再自行开回合"。
+父会话重建（含重启）时，未送达的结束项，以及被打断的运行（作为 outcome 为 `interrupted`、用量为 0 的条目），恢复进队列，但**不自动开轮**，而是合成一条 `cherry.subagent-notification` 随下一个运行的开头送达（7.5 的方式）。用通知而不是状态消息，是因为通知的 `(sessionId, run)` 去重键能保证每一项只说一次；状态消息每次重建都会再说一遍。Claude Code 在 2.1.280 明确改成"恢复会话时不再自行开回合"。
 
 ## 8. 续接与持久化
 
@@ -581,4 +581,8 @@ goal 在 settle 做决定时（L5 spec §6.2 的 decide），原来的 `hasRunni
 9. 5.2、5.3、11.4：`stop_subagent` 和 `message_subagent` 的结果带结构化 `details`（`SubagentStopDetails`、`SubagentMessageDetails`，含 `sessionId`，已知用量时含 `usage`）；goal 按与通知相同的口径计入，不重复计数。
 10. 7.4、13.1：宿主在 `turn-complete` 里调 `AgentRuntimeSession.prompt` / `compact` 时，包等这次 settle 和期间 Pi 开出的运行都结束，再在锁内执行，结果如实 resolve 或 reject（Pi 会推迟 settle 派发期间的 prompt 并立即返回，原来会丢用户消息）。
 11. 7.5：不是由 prompt 开出的运行（如 `/goal resume`），settle 时队列非空就并入，包括只有静默项或重建恢复项的情况。
+
+2026-10-15，升级 Pi 1.2.0（L7）后修订：
+
+12. 7.5、7.6、7.7：Pi 1.2.0 起 `before_agent_start` 对自定义消息开出的运行（命令、通知轮、goal 轮）也触发，`messageType` 为 `custom`。决定接受这一行为：每个运行的开头都带走队列里的全部项并结束抑制期；第 11 条作废，settle 时只在有会唤醒的项时并入。17 节的 Pi 1.1.0 事实中，`prompt()` 准备期误报空闲的窗口在 1.2.0 缩小为命令与 `input` 处理器阶段，`settle` 派发期间推迟 `prompt()` 不变。
 
