@@ -1,6 +1,7 @@
 import { modelService } from '@data/services/ModelService'
 import { providerService } from '@data/services/ProviderService'
 import { loggerService } from '@logger'
+import { assertAgentGatewayModelAvailable } from '@main/ai/runtime/agentGatewayModelAvailability'
 import { getAppEdition } from '@main/utils/appEdition'
 import { isManagedCherryAiDefaultModel } from '@shared/data/presets/cherryai'
 import { type Model, parseUniqueModelId, type UniqueModelId } from '@shared/data/types/model'
@@ -8,6 +9,8 @@ import type { Provider } from '@shared/data/types/provider'
 import { formatGatewayModelId } from '@shared/utils/apiGateway'
 import { isGatewayRoutableModel } from '@shared/utils/model'
 import { isAgentOnlyProvider, isExternalCliProvider } from '@shared/utils/provider'
+
+export { assertAgentGatewayModelAvailable }
 
 const logger = loggerService.withContext('ApiGatewayModels')
 
@@ -122,40 +125,6 @@ export function resolveGatewayModelAddress(modelAddress: string, allowAgentOnly 
   }
 
   return { providerId, apiModelId, uniqueModelId: model.id, provider, model }
-}
-
-/**
- * Actionable pre-flight check for Agent runtimes holding an already-resolved
- * `Provider` + `Model` pair. Mirrors the availability contract
- * {@link resolveGatewayModelAddress} enforces (enabled provider/model, routable
- * model, no external-CLI or — unless `allowAgentOnly` — agent-only providers),
- * but names the cause so a stale or disabled Agent model surfaces as a
- * configuration error before generation instead of a late generic 400.
- *
- * Missing rows never reach here — `getByProviderId`/`getByKey` already throw
- * `NOT_FOUND` for those. Throws an `Error` describing how to fix the config.
- */
-export function assertAgentGatewayModelAvailable(
-  provider: Provider,
-  model: Model,
-  modelAddress: string,
-  allowAgentOnly = false
-): void {
-  if (provider.isEnabled === false) {
-    throw new Error(`Agent model "${modelAddress}" is not available: provider "${provider.id}" is disabled.`)
-  }
-  if (model.isEnabled === false) {
-    throw new Error(`Agent model "${modelAddress}" is not available: the model is disabled.`)
-  }
-  if (isExternalCliProvider(provider)) {
-    throw new Error(`Agent model "${modelAddress}" is not available through the API gateway.`)
-  }
-  if (!allowAgentOnly && isAgentOnlyProvider(provider, getAppEdition())) {
-    throw new Error(`Agent model "${modelAddress}" is not available through the API gateway.`)
-  }
-  if (!isGatewayRoutableModel(model)) {
-    throw new Error(`Agent model "${modelAddress}" is not available through the API gateway.`)
-  }
 }
 
 /**

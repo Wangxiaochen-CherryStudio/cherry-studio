@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { REASONING_FORMAT_PROFILES } from '@cherrystudio/provider-registry'
-import type * as GatewayModels from '@main/features/apiGateway/utils/models'
 import { CHERRY_CLOUD_MODEL_GROUP, CHERRY_CLOUD_PROVIDER_ID } from '@shared/data/presets/cherryai'
 import { ENDPOINT_TYPE, type EndpointType, type Model, MODEL_CAPABILITY } from '@shared/data/types/model'
 import type { Provider } from '@shared/data/types/provider'
@@ -121,8 +120,7 @@ vi.mock('../../../provider/endpoint', () => ({
 
 // Route-derivation tests stub pure resolvers (same convention as `resolveEffectiveEndpoint` above).
 // The availability predicate itself is covered in the gateway models suite.
-vi.mock('@main/features/apiGateway/utils/models', async (importOriginal) => ({
-  ...(await importOriginal<typeof GatewayModels>()),
+vi.mock('@main/ai/runtime/agentGatewayModelAvailability', () => ({
   assertAgentGatewayModelAvailable: mocks.assertGatewayModelAvailable
 }))
 
